@@ -4,6 +4,10 @@ igus_ws/log/
 igus_ws/src/iRC_ROS/
 __pycache__/
 igus_ws/src/Igus_rebel/
+igus_ws_jtc/build/
+igus_ws_jtc/install/
+igus_ws_jtc/log/
+igus_ws_jtc/src/
 .venv_quest/
 logs/
 .venv_record/
@@ -13,3 +17,4 @@ datasets/
 config/launcher.json
 config/install_profile.env
 latest_run/
+dataset_backup/
