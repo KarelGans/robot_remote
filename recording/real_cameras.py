@@ -16,6 +16,7 @@ recorder starts (never /dev/videoN: it renumbers on every replug):
 Each camera runs a reader thread that keeps only the newest decoded frame and its capture time (time.monotonic()).
 A camera that stops producing frames is reported stale by latest(), never blocks the caller.
 
+  recording/run_camera_setup.sh                      # window: live picture + name drop-down per camera, Save
   recording/run_cameras.sh --list                    # every V4L2 colour node with its stable paths
   recording/run_cameras.sh --snapshot [--all]        # one JPEG per configured camera (--all: + unconfigured nodes)
   recording/run_cameras.sh --test 10                 # all configured cameras together for 10 s: fps / gaps
@@ -213,6 +214,31 @@ def open_cameras(keys, config=None) -> dict:
     return cams
 
 
+VIDIOC_ENUM_FMT = 0xC0405602  # _IOWR('V', 2, struct v4l2_fmtdesc), sizeof = 64
+V4L2_BUF_TYPE_VIDEO_CAPTURE = 1
+
+
+def pixel_formats(dev) -> list[str]:
+    """FOURCCs a V4L2 node offers (VIDIOC_ENUM_FMT, like v4l2-ctl --list-formats; no streaming, no format change)."""
+    import fcntl
+    import struct
+
+    fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    out = []
+    try:
+        for i in range(64):
+            # struct v4l2_fmtdesc: index, type, flags, description[32], pixelformat (offset 44), mbus_code, reserved[3]
+            buf = bytearray(struct.pack("<II", i, V4L2_BUF_TYPE_VIDEO_CAPTURE) + bytes(56))
+            try:
+                fcntl.ioctl(fd, VIDIOC_ENUM_FMT, buf)
+            except OSError:
+                break  # EINVAL = end of the list
+            out.append(struct.unpack_from("<I", buf, 44)[0].to_bytes(4, "little").decode("ascii", "replace"))
+    finally:
+        os.close(fd)
+    return out
+
+
 def colour_nodes():
     """video_nodes() that offer a colour format (skips Orbbec depth Z16 / IR GREY / raw Bayer functions)."""
     import subprocess
@@ -220,10 +246,13 @@ def colour_nodes():
     out = []
     for n in video_nodes():
         try:
-            fmts = subprocess.run(["v4l2-ctl", "-d", n["dev"], "--list-formats"], capture_output=True, text=True,
-                                  timeout=3).stdout
-        except (OSError, subprocess.SubprocessError):
-            continue
+            fmts = [f"'{f}'" for f in pixel_formats(n["dev"])]
+        except OSError:  # cannot open the node: ask v4l2-ctl (if installed) instead
+            try:
+                fmts = subprocess.run(["v4l2-ctl", "-d", n["dev"], "--list-formats"], capture_output=True, text=True,
+                                      timeout=3).stdout
+            except (OSError, subprocess.SubprocessError):
+                continue
         if any(f"'{f}'" in fmts for f in ("MJPG", "YUYV")):
             out.append(n)
     return out

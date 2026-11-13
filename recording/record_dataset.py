@@ -7,11 +7,18 @@ Inputs (ROS 2, read through Isaac Sim's bundled Python-3.12 rclpy - see run_reco
   /dual_arm/{head,wrist_left,wrist_right}/rgb -> observation.images.{head,wrist_left,wrist_right}
   /quest_teleop/events             <- Quest buttons: "toggle" (A: start / save), "discard" (B), "reset" (Y: scene reset,
                                       discards an open episode)
-  /clock                           -> sampling clock (sim time)
+  /recorder/episode_end            -> "saved" / "discarded" when an episode stops (real_robot/mocap_follower.py homes)
+  /clock                          -> sampling clock (sim time)
 
 Frames are sampled every 1/fps of SIM time (Isaac runs below real time, ~0.77x), so timestamps in the
 dataset match the simulated motion. Keyboard fallback in this terminal: Enter = toggle, d = discard,
 q = save/finish and quit.
+
+Flap labels (box-opening demos, recording/flap_segments.py), only with --flaps-sequence [PATH] (alone =
+config/flaps_sequence.yaml, one instruction sentence per step). A recording starts on flap 1; `n` + Enter = "this flap
+is finished, go to the next"; the last flap ends when the episode is saved. Every frame's LeRobot task is the sentence of
+the current flap (instead of --task), so the dataset itself says which flap each frame belongs to; after a saved episode
+one line {"episode_index", "subtasks", "start_frames"} is appended to <dataset>/meta/subtask_marks.jsonl.
 
 --source real (the physical arms, quest_teleop/run_quest_real_arm.sh = --backend real-ros):
   /{left,right}/joint_states       -> observation.state arm joints (igus ROS driver of each arm); an arm without a
@@ -37,6 +44,7 @@ import rclpy
 import rclpy.executors
 
 import dataset_check
+import flap_segments
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rosgraph_msgs.msg import Clock
@@ -91,6 +99,8 @@ class Recorder(Node):
         self.events: queue.Queue[str] = queue.Queue()
         self.create_subscription(JointState, "/quest_teleop/action", self.on_action, 10)
         self.create_subscription(String, "/quest_teleop/events", lambda m: self.events.put(m.data), 10)
+        # "saved" / "discarded" the moment an episode stops (before encoding): the mocap follower homes the arm on it
+        self.episode_end = self.create_publisher(String, "/recorder/episode_end", 10)
         if self.real:
             for s in SIDES:
                 self.create_subscription(JointState, REAL_STATE_TOPIC.format(side=s),
@@ -254,13 +264,15 @@ def check_resume(info_path, features, robot_type, fps):
 def keyboard_thread(events: queue.Queue):
     for line in sys.stdin:
         c = line.strip().lower()
-        events.put({"": "toggle", "d": "discard", "q": "quit"}.get(c, "toggle" if c == "s" else "unknown"))
+        events.put({"": "toggle", "d": "discard", "q": "quit", "n": "next_flap"}.get(
+            c, "toggle" if c == "s" else "unknown"))
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--name", required=True, help="dataset folder name under --root")
-    p.add_argument("--task", required=True, help="language instruction stored with every frame")
+    p.add_argument("--task", required=True,
+                   help="language instruction stored with every frame (with --flaps-sequence: the flap sentences instead)")
     p.add_argument("--root", default=os.environ.get("ROBOT_REMOTE_DATASETS", str(dataset_check.DEFAULT_ROOT)),
                    help="folder that holds the datasets (default: robot_remote/dataset)")
     p.add_argument("--repo-id", default=None, help="default: local/<name>")
@@ -275,9 +287,17 @@ def main():
     p.add_argument("--camera-config", default=None, help="real: camera devices (default config/real_cameras.json)")
     p.add_argument("--image-writer-threads", type=int, default=None, help="default: 4, or 2 per camera on real")
     p.add_argument("--vcodec", default="libsvtav1")
-    p.add_argument("--max-episode-s", type=float, default=120.0, help="auto-save after this much sim / wall time")
+    p.add_argument("--max-episode-s", type=float, default=0.0,
+                   help="auto-save after this much sim / wall time [s] (0 = never: an episode ends only on Enter / A)")
+    p.add_argument("--flaps-sequence", nargs="?", const=str(flap_segments.DEFAULT_SEQUENCE), default=None,
+                   metavar="YAML",
+                   help="label every frame with the current box flap (1: open the back flap ...; alone = "
+                        "config/flaps_sequence.yaml); 'n' in this terminal = next flap")
     args = p.parse_args()
     args.repo_id = args.repo_id or f"local/{args.name}"
+    tracker = None
+    if args.flaps_sequence:  # before the cameras open: a bad file stops right here
+        tracker = flap_segments.FlapTracker(flap_segments.load_sequence(args.flaps_sequence))
 
     cameras = {}
     if args.source == "real":
@@ -314,7 +334,29 @@ def main():
         print("[rec] REAL robot: wall-clock sampling, Y = discard the open episode (the teleop moves the arms home)",
               flush=True)
     print("[rec] controls: Quest A = start / save episode, B = discard, Y = reset scene (X = rotation frame) | keyboard: Enter = start/save, "
-          "d = discard, q = quit", flush=True)
+          "d = discard, n = next flap (with --flaps-sequence), q = quit", flush=True)
+    if tracker:
+        print(f"[rec] flap order ({args.flaps_sequence}): "
+              + ", ".join(f"{i}: {s}" for i, s in enumerate(tracker.sequence, 1))
+              + "  - a recording starts on flap 1; n + Enter = this flap is finished", flush=True)
+    had_marks = (root / flap_segments.MARKS_FILE).exists()
+    if ds.meta.total_episodes and had_marks != bool(tracker):
+        print(f"[rec] WARNING: the {ds.meta.total_episodes} earlier episodes of this dataset were recorded "
+              + ("without" if tracker else "with") + " flap labels; new episodes will be labelled differently. "
+              "Use another --name to keep them apart.", flush=True)
+
+    def save_with_flaps():
+        """Save the open episode; with flap labels also append its line to meta/subtask_marks.jsonl (after the save)."""
+        ep = ds.meta.total_episodes
+        rec = tracker.finish() if tracker else None
+        ds.save_episode(parallel_encoding=False)  # process-pool encoding deadlocks next to rclpy threads (fork)
+        if rec is None:
+            return
+        try:
+            flap_segments.write_marks(root, ep, rec)
+            print(f"[rec] {tracker.summary(rec)}", flush=True)
+        except OSError as e:
+            print(f"[rec] WARNING: could not write {flap_segments.MARKS_FILE}: {e}", flush=True)
     threading.Thread(target=keyboard_thread, args=(node.events,), daemon=True).start()
 
     executor = rclpy.executors.SingleThreadedExecutor()
@@ -345,28 +387,42 @@ def main():
                         continue
                     recording, n_frames, n_stale, n_late = True, 0, 0, 0
                     next_t = ep_start = node.now()
-                    print(f"[rec] ● RECORDING episode {ds.meta.total_episodes}  (task: {args.task})", flush=True)
+                    print(f"[rec] ● RECORDING episode {ds.meta.total_episodes}  "
+                          + (tracker.start() if tracker else f"(task: {args.task})"), flush=True)
+                elif ev == "next_flap":
+                    print(tracker.next(n_frames) if tracker else
+                          "[rec] n ignored: start the recorder with --flaps-sequence to label flaps", flush=True)
                 elif ev == "toggle" and recording:
                     recording = False
                     if n_frames < 2:
+                        if tracker:
+                            tracker.discard()
                         ds.clear_episode_buffer()
+                        node.episode_end.publish(String(data="discarded"))
                         print("[rec] episode too short - discarded", flush=True)
                         continue
+                    node.episode_end.publish(String(data="saved"))
                     print(f"[rec] saving episode {ds.meta.total_episodes} ({n_frames} frames, "
                           f"{n_frames / args.fps:.1f}s {clock_name}, {n_stale} frames had a stale stream"
                           + (f", {n_late} late ticks" if n_late else "") + ") ...", flush=True)
-                    ds.save_episode(parallel_encoding=False)  # process-pool encoding deadlocks next to rclpy threads (fork)
+                    save_with_flaps()
                     print(f"[rec] ■ saved. total episodes: {ds.meta.total_episodes}", flush=True)
                 elif ev == "reset":
                     if recording:
                         recording = False
+                        if tracker:
+                            tracker.discard()
                         ds.clear_episode_buffer()
+                        node.episode_end.publish(String(data="discarded"))
                         print(f"[rec] ✕ discarded ({n_frames} frames) - scene reset", flush=True)
                     else:
                         print("[rec] scene reset (no open episode)", flush=True)
                 elif ev == "discard" and recording:
                     recording = False
+                    if tracker:
+                        tracker.discard()
                     ds.clear_episode_buffer()
+                    node.episode_end.publish(String(data="discarded"))
                     print(f"[rec] ✕ discarded ({n_frames} frames)", flush=True)
                 elif ev == "quit":
                     raise KeyboardInterrupt
@@ -395,7 +451,7 @@ def main():
             if frame is None:
                 print(f"[rec] frame skipped: {stale}", flush=True)
                 continue
-            frame["task"] = args.task
+            frame["task"] = tracker.task if tracker else args.task  # flap labels: LeRobot stores it as task_index
             t_add = time.monotonic()
             ds.add_frame(frame)
             n_frames += 1
@@ -406,16 +462,17 @@ def main():
             if time.monotonic() - last_status > 1.0:
                 last_status = time.monotonic()
                 print(f"[rec] ● {n_frames} frames ({n_frames / args.fps:.1f}s {clock_name})"
+                      + (f"  [{tracker.label()}]" if tracker else "")
                       + (f"  stale: {', '.join(stale)}" if stale else "")
                       + (f"  late ticks: {n_late}" if n_late else ""), flush=True)
-            if now - ep_start > args.max_episode_s:
+            if args.max_episode_s > 0 and now - ep_start > args.max_episode_s:
                 node.events.put("toggle")
     except KeyboardInterrupt:
         pass
     finally:
         if recording and n_frames >= 2:
             print(f"[rec] saving the open episode ({n_frames} frames) before exit ...", flush=True)
-            ds.save_episode(parallel_encoding=False)
+            save_with_flaps()
         ds.finalize()
         print(f"[rec] finalized {root}  ({ds.meta.total_episodes} episodes)", flush=True)
         for cam in cameras.values():

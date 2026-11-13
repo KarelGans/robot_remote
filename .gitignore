@@ -18,3 +18,5 @@ config/launcher.json
 config/install_profile.env
 latest_run/
 dataset_backup/
+config/real_cameras.json.bak
+config/real_cameras.json.tmp

@@ -20,6 +20,7 @@ LEROBOT_PY = os.environ.get("LEROBOT_PY") or next(
 DOMAIN = 87
 try:
     import rclpy
+    import rclpy.executors
     from sensor_msgs.msg import JointState
     from std_msgs.msg import String
 except ImportError:  # pragma: no cover
@@ -60,6 +61,10 @@ class RealRecordingTest(unittest.TestCase):
                     "viz": node.create_publisher(JointState, "/quest_teleop/joint_states", 10),
                     "action": node.create_publisher(JointState, "/quest_teleop/action", 10),
                     "events": node.create_publisher(String, "/quest_teleop/events", 10)}
+            ends = []  # /recorder/episode_end: the mocap follower homes the arm on it
+            node.create_subscription(String, "/recorder/episode_end", lambda m: ends.append(m.data), 10)
+            ex = rclpy.executors.SingleThreadedExecutor(context=ctx)
+            ex.add_node(node)
             stop = threading.Event()
 
             def publish():  # one-arm session: only the left driver runs; the teleop reports the right arm's pose
@@ -68,6 +73,7 @@ class RealRecordingTest(unittest.TestCase):
                     pubs["viz"].publish(JointState(name=[f"arm_{s}_{j}" for s in ("left", "right") for j in ARM],
                                                    position=[9.0] * 6 + RIGHT_ASSUMED))
                     pubs["action"].publish(JointState(name=NAMES, position=ACTION))
+                    ex.spin_once(timeout_sec=0)
                     time.sleep(1 / 30)
 
             env = {**os.environ, "ROBOT_REMOTE_DOMAIN_ID": str(DOMAIN), "LEROBOT_PY": LEROBOT_PY}
@@ -119,6 +125,7 @@ class RealRecordingTest(unittest.TestCase):
                 node.destroy_node()
                 rclpy.shutdown(context=ctx)
 
+            self.assertEqual(ends, ["saved", "discarded"])
             root = tmp / "ds"
             info = json.loads((root / "meta/info.json").read_text())
             self.assertEqual(info["robot_type"], "igus_rebel_dual_arm_real")

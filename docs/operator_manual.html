@@ -493,7 +493,7 @@ cat ~/isaac-sim-6.1/VERSION</code></pre><button type="button" data-copy="c-isaac
       <li>Start every take from the same scene: press <strong>Y</strong> after saving (arms home, flaps closed), then A.</li>
       <li>The recorder takes a frame every 1/30 s of <strong>simulation</strong> time. If Isaac runs slower than real time (cameras, extra viewports, a busy CPU), 10 s of your time is less than 10 s of data. The sim log's <code>[dual_arm] [timing]</code> line shows the current speed.</li>
       <li>Real arms: frames are taken on <strong>wall-clock</strong> time at the chosen fps and the recorder counts late ticks in its log. Stop all saves an open episode <em>before</em> the arms return to 0°.</li>
-      <li>An episode saves itself after 120 s (sim time in the simulator).</li>
+      <li>An episode ends only when you save it (Enter / A); <code>--max-episode-s N</code> restores an automatic save after N s.</li>
       <li>Saving encodes the videos (AV1) and takes a few seconds in the simulator; with four real cameras it takes about twice the episode length. Wait for the banner to show <em>READY</em> before the next take.</li>
     </ul>
   </div>

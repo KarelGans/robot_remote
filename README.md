@@ -141,6 +141,61 @@ half. Working setup (2026-10-21, 30 s test: ARC ~47 decoded fps each, Orbbecs 30
 USB 3 PC port, `--list` showing both Orbbecs at 5000 Mbit/s. When the hub sat on a USB 2-only port all four shared
 480 Mbit/s: the second ARC got "Not enough bandwidth for altsetting" and the Gemini 336 kept resetting (error -71).
 
+## Mocap (OptiTrack) recording on the real right arm — step by step
+
+OptiTrack → `rebel_demo` (IK, `~/dual_arm_control`, ROS domain 12) → `real_robot/mocap_follower.py` → igus driver
+(domain 42) → arm; the recorder reads the arm + the follower's `/quest_teleop/action` + the USB cameras.
+One terminal per step, in this order. `$R` = `~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh`
+(defined in `~/.bashrc`; in a terminal without it: `R=~/dual_arm_control/src/rebel_mocap_teleop/scripts/run.sh`).
+
+| # | Terminal | Command | Wait for / then |
+| --- | --- | --- | --- |
+| 1 | OptiTrack | `$R driver`, then in another terminal `$R activate` | Motive streaming; `/rigid_bodies` at ~118 Hz |
+| 2 | Arm driver | `cd ~/robot_remote-main && conda deactivate`<br>`source /opt/ros/humble/setup.bash && source igus_ws_jtc/install/setup.bash`<br>`ros2 launch real_robot/dual_arm_driver.launch.py arms:=right` | e-stop released; `gains tuned, jog_velocity_scale 1.65` and `success=True` |
+| 3 | rebel_demo | `$R real rig:=right` (fresh terminal: nothing from robot_remote sourced) | teleop node up |
+| 4 | Keyboard | `$R keyboard` | keep it focused: **SPACE** = engage / pause |
+| 5 | Follower | `cd ~/robot_remote-main && ./real_robot/run_mocap_follower.sh --arm right --mocap-domain 12` | type `e` (enable), `h` (arm home) |
+| 6 | Recorder | `cd ~/robot_remote-main && conda deactivate`<br>`./recording/run_cameras.sh --test 20 --cameras head wrist_right`<br>`ISAAC_SIM=$HOME/isaacsim ./recording/run_record.sh --source real --root ~/robot_remote-main/dataset --name NAME --task "open the box flaps" --cameras head wrist_right` | both cameras ~30 fps in the test; then `[rec] controls: …` (ready) |
+
+Per episode: SPACE (terminal 4) → **Enter** (terminal 6) starts (`● RECORDING episode N`) → do the task → **Enter** saves (the follower brings
+the arm home by itself) → wait for `■ saved` → next. `d` discards the open episode. There is no length limit
+(`--max-episode-s N` would auto-save after N s). Finish with **`q`** in the recorder (writes the episode index and
+closes the data file) — never close the terminal or kill it, or the last session's episodes are unreadable.
+Stop the follower with `q`, the others with Ctrl+C. View: `./launcher/run_replay_gui.sh ~/robot_remote-main/dataset/NAME`
+→ Load → episode → **View**.
+
+- **NAME**: a new name creates a dataset; an existing one appends — only with the same cameras / fps (else refused).
+- **Flap labels** (box-opening demos): add **`--flaps-sequence`** to the recorder command (alone =
+  `config/flaps_sequence.yaml`; other file: `--flaps-sequence PATH`; a wrong file stops the recorder at start). The YAML
+  lists one instruction sentence per step (`1: open the back flap` … `4: open the left flap`). Each recording **starts on
+  flap 1**, no key needed. Type **`n`** + Enter in the recorder terminal when a flap is finished (robot paused): that ends
+  the flap and moves to the next one (`[rec] … -> now flap 2/4: open the front flap (from frame 702)`); four flaps = three
+  `n`. The last flap ends when you save. `n` on the last flap or while not recording is ignored.
+  - In the dataset, every frame's LeRobot **task** is the sentence of the flap that was current (instead of `--task`), so
+    `LeRobotDataset(...)[i]["task"]` gives it and `meta/tasks.parquet` lists the sentences.
+  - After a saved episode the recorder prints `flaps: 4 of 4 reached …` (fewer = a missed `n`) and appends one line to
+    `<dataset>/meta/subtask_marks.jsonl`: `{"episode_index": 0, "subtasks": [...], "start_frames": [0, 702, …]}`.
+    A discarded episode leaves nothing.
+  - The boundary is when `n` was typed, i.e. after the pause. Without `--flaps-sequence` every frame gets `--task` and
+    `n` is ignored. Keep flap-labelled and unlabelled episodes in separate datasets (the recorder warns when they would
+    mix, e.g. resuming `mocap_right_1` with `--flaps-sequence`).
+- **Driver**: `igus_ws_jtc` = Igus_rebel 287b0186 with the `tuned` gains, on branch `fani8j-controller` only; on `main`
+  source `igus_ws/install/setup.bash` instead (old driver, `gains:=standard`). The launch refuses `tuned` with the old
+  driver. `gains:=standard` on the new driver = the old behaviour.
+- **rebel_demo** fails with `dual_arm_rig_v2.urdf.xacro: No such file` when the terminal also sourced robot_remote's
+  `igus_ws` (both workspaces contain `igus_rebel_description`; the last sourced wins) — use a fresh terminal.
+- **Recorder** `No module named 'rclpy'`: `ISAAC_SIM=$HOME/isaacsim` missing (it must be on the same line, or
+  `export`ed). Do not source `/opt/ros` in the recorder terminal.
+- **Camera names**: `./recording/run_camera_setup.sh` opens a window with the live picture of every connected camera
+  and a name drop-down (`wrist_left`, `wrist_right`, `head`, `knife`, `(not used)`); picking a name another camera has
+  swaps the two. **Save** overwrites `config/real_cameras.json` (old file → `real_cameras.json.bak`). Close the recorder
+  first. The wrist cameras are stored by USB port, so keep them in the same ports afterwards.
+- **Cameras**: always pass `--cameras` (without it the test opens every configured camera, also unplugged ones). The
+  Gemini 336 belongs on a USB 3 port (5000 Mbit/s); on USB 2 it shares the bus with the ARC wrist camera, which then
+  drops out and the recorder writes a frozen wrist image (`stale: wrist_right` in the `[rec] ●` line → `d`, restart the
+  recorder). Check: `for d in /sys/bus/usb/devices/*; do [ "$(cat $d/idVendor 2>/dev/null)" = 2bc5 ] && echo "$(cat $d/product) $(cat $d/speed)"; done`.
+- **Logs**: the follower overwrites `latest_run/mocap_follower_trace.csv` on every start — copy it first if you need it.
+
 ## Tools
 
 | Script | Purpose |
@@ -149,7 +204,8 @@ USB 3 PC port, `--list` showing both Orbbecs at 5000 Mbit/s. When the hub sat on
 | `launcher/run_gui.sh` | Settings window + process manager (recommended entry point). |
 | `dual_arm_sim/run_dual_arm_sim.sh [--cameras head wrist_left wrist_right] [--headless]` | Isaac Sim rig + ROS 2 bridge. Do not source `/opt/ros` in this terminal. |
 | `quest_teleop/run_quest_dual_arm.sh [--arms left right] [--yaw-deg 180 --swap-hands]` | Quest → both arms, direct to Isaac. |
-| `recording/run_record.sh --name N --task "…" [--source real]` | Recorder. Keyboard fallback: Enter = start/save, d = discard, q = quit. |
+| `recording/run_camera_setup.sh` | Real cameras: live picture of each + name drop-down; Save writes `config/real_cameras.json`. |
+| `recording/run_record.sh --name N --task "…" [--source real] [--flaps-sequence]` | Recorder. Keyboard fallback: Enter = start/save, d = discard, n = next flap (with `--flaps-sequence`), q = quit. |
 | `latest_run/` | Newest session only, emptied on every launcher Start: `<process>.log` copies and `teleop_trace.csv` (per tick and arm: Quest hand, grip, target, IK, joint command sent, measured joints, lag, which limit acted, log messages). Terminal runs overwrite the trace too (`--trace ''` = off). Timestamped logs stay in `logs/`. |
 | `recording/run_cameras.sh --list / --snapshot / --test 10` | Real rig USB cameras: find nodes, save one JPEG per configured camera (`logs/camera_snapshots/`), measure fps together. |
 | `launcher/run_replay_gui.sh [dataset folder]` | Playback window: choose a dataset folder + episode, then **View** (LeRobot viewer / Rerun) or **Replay in Isaac**. |

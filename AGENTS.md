@@ -330,3 +330,71 @@
 - GUI：圖例 X 改用獨立顏色（teal）並新增說明，文字精簡讓整個圖例可見；Real 區原本一行過長（RViz / 回 home / 回 0° 被截掉），改為多行；視窗高度 820 → min(900, 螢幕高 − 80)，否則 Start 按鈕被擠出畫面（截圖確認）。
 - 手冊：A / X / Y 說明、控制器圖（X `data-k="x"`、`--frame` 顏色、亮暗主題）、提示列縮短（原本被裁切）、Y 說明去掉矛盾的「Simulator only」；README 按鍵表、資料流同步；recorder 提示文字。
 - 新測試：左手 X 兩次 → rot_frame tool → base → tool，且不送 toggle 事件。81 項測試通過；手冊與 GUI 以瀏覽器 / 截圖檢查。未用實際頭盔按 X 驗證。
+
+## Mocap 遙控橋接 `real_robot/mocap_follower.py`（2026-10-25，Claude；使用者筆電 + Docker）
+
+- 需求：以 KarelGans/rebel_mocap_teleop（branch `juan-latest-fix-limit`，ROS 套件 `rebel_demo`，在另一台 Wi-Fi 上的電腦、ROS_DOMAIN_ID 12）控制實體手臂。它發布 `/dual_arm/isaac_joint_commands`（JointState、約 60 Hz、`arm_left_joint1..6` / `arm_right_joint1..6` 絕對角度 rad + 夾爪 carriage），並需要 `/joint_states`（`arm_<side>_joint1..6` 量測值，`require_joint_states:=true`）。原本由機器人 PC 上的 MoveIt Servo "mocap follower" 接收（不在該 repo）。
+- 新增 `real_robot/mocap_follower.py` + `run_mocap_follower.sh --arm left [--dry-run] [--mocap-domain 12]`：單一程序兩個 rclpy context（rcl 在 init 時讀 ROS_LOCALHOST_ONLY，故每個 context 各自設定）：mocap 端 domain 12、非 localhost（訂閱命令、回傳 `/joint_states`、`/mocap_follower/status`）；機器人端 ros_env.sh（42、localhost）。命令方式與 Quest teleop real-ros 相同（30 Hz 單點短軌跡 0.15 s、accel_step + leash，預設 precise 15°/s、0.52 rad/s²、收尾 0.3、leash 10°、關節限位內縮 3°）。啟動時為 DISABLED，stdin `e`/`d`/`q` 或 robot domain `/mocap_follower/enable`（Bool）。HOLD（glide 0.4 rad/s² 後不再送）：mocap 串流 > 0.25 s、單筆跳 > 12°、目標距手臂 > 25° 才接合、手臂 1 s 不跟隨（並自動 disable）、命令 topic 有其他 publisher；joint states > 0.5 s 或 **state topic 有兩個以上 publisher** → 完全不送。mocap domain 為 42/91/11 時拒絕。夾爪忽略（無實體夾爪）。trace `latest_run/mocap_follower_trace.csv`。無碰撞檢查（另一臂、桌、支架）。
+- 測試 `tests/test_mocap_follower.py`（8 項，robot 端 domain 97、mocap 端 98；沿用 test_real_ros_tracking 的 FakeRebelDriver）：跟隨 + 回傳名稱、stale 停止且不再送、跳變停止、disabled 不送 / stdin 啟用、J5 限位、拒絕其他命令 publisher、第二個 joint_states publisher 時不送、拒絕 robot domain。全部通過。注意：`hardware_protocol:=mock_hardware` 的 GenericSystem 不積分 velocity 命令（手臂不動），不能用來驗證動作。
+- 過程紀錄：手動 mock 測試留下 domain 97 的 mock driver（`pkill -f mock_hardware` 抓不到 ros2_control_node），導致 `/left/joint_states` 交錯真值與 0、follower 命令亂跳（僅在假手臂上）→ 新增上述 state publisher 檢查。清理測試程序時以 `/proc/<pid>/environ` 的 ROS_DOMAIN_ID 確認，勿誤殺 domain 42 的實體 driver。
+- 未驗證：與實際 mocap PC 的 Wi-Fi 探索（2026-10-25 domain 12 尚未看到其 topic）、實體手臂動作。
+- 2026-10-25 實機事件（mocap，左臂）：follower 啟用後手臂跟隨到 (12.6, 48.0, 92.8, 3.1, 51.6, −17.6)°、TCP z ≈ −50 mm（推測工具壓到桌面）→ J5 過電流 `_MNE_OC`（錯誤碼 0x0044）馬達停用。follower 正確偵測「arm does not follow」，但之後卡在 glide 持續送命令約 40 s（舊 glide 目標 + leash 讓命令速度永不為 0；馬達已停，手臂未動）。修正：stall 時立即停止送出（不 glide）、glide 一定結束（到達 / 速度 0 / `--glide-max-s` 3 s）、進入 follow 時清除舊 glide 目標；離開時先 join spin 執行緒（修正 quit 時 `terminate called` abort）。新增回歸測試（假手臂凍結後不再收到命令）。之後以 RViz pretest reset_and_enable 清除錯誤。
+- 錄製：follower 也在 robot domain 發布 `/quest_teleop/action`（14 維：被驅動臂 = 送出的命令／未送時為量測值，夾爪 = mocap carriage 換算 0..1；另一臂 = `--other-arm-deg`）與 `/quest_teleop/joint_states`（量測 + 假設姿態），`recording/run_record.sh --source real` 不需修改即可錄製（Enter 開始/存檔、d 丟棄）。測試 10 項通過；端對端（假手臂 + follower + 假 rebel_demo + 實際 recorder，無相機）存檔 1 episode、121 幀、0 stale、action 14 維、右臂 = home。未在實機錄製。
+- 2026-10-26 使用者要求「不要由 follower 移動手臂，交給 mocap」：實機按 `e` 時 rebel_demo 暫停在離手臂約 20° 的姿態，follower 自行把手臂移過去（向右）。`--engage-deg` 預設 25 → **3**：啟用 / hold 後只在 mocap 目標與手臂量測值相差 ≤ 3° 時才開始跟隨，絕不主動移向遠處目標（狀態列顯示目前差距；需 rebel_demo 重新 home / 重啟使目標回到手臂）。回傳 `/joint_states` 也包含未驅動臂（`--other-arm-deg`），因 rebel_demo `rig:=both` 需兩臂才發布。新增測試（遠目標啟用 → 不送命令、手臂不動；目標回到手臂後才跟隨），11 項通過。另：實機多次因乙太網路斷線（EEE 開啟、100 Mbps）使 driver 重連後鎖住動作，需重啟 driver。
+
+## 實驗室 PC `ai-iece`（user1）原生執行、不用 Docker（2026-10-30，Claude）
+
+- 此 repo 由 `kha` 筆電複製而來（.venv_record、igus_ws build 指向 /home/kha）。本機 Ubuntu 22.04.5 + /opt/ros/humble，原生執行即可；user1 無 docker 權限。
+- 網路：機器人線接內建 eno1（Aquantia 10 GbE、atlantic）時 link 反覆上下；改 USB 轉 RJ45（ASIX AX88179，`enx00909e9d814c`）並換線後 100 Mbit/s 穩定。NetworkManager profile `robot`：192.168.3.54/24、never-default、ipv6 ignore（eno2 校園網路與 ThinLinc 遠端連線不受影響）。兩臂 ping 與 CRI 3920 可達（只 ping + 連線即關，未送任何命令）。
+- igus_ws：原 kha 的 build/install/log 改名為 `*.kha`（未刪），在本機重建 igus_rebel + igus_rebel_moveit_config。**miniconda 會污染連結（libssl.so.3 undefined reference）**：建置與執行 ROS 前先 `conda deactivate`（建置時以 `env -i` 乾淨環境）。rviz_pretest mock_hardware 驗證：driver / 控制器 / move_group 啟動、/joint_states 有資料；move_group 只在 Ctrl+C 結束時 segfault（MoveIt Humble 已知解構問題，無害）。
+- 尚未完成：uv、`.venv_record`（LeRobot 0.5.x）、Isaac Sim 為 6.0.1（`~/isaacsim`，bundled rclpy 為 py3.12，錄製時 `ISAAC_SIM=~/isaacsim`，未測）、相機 USB 埠未在本機確認。實機 RViz 尚未執行。
+- 實機 RViz pretest（左臂，使用者在 VS Code 終端啟動）：driver 連上、reset_and_enable 後 `NoError, KinOK`，關節 (0, 0, 5, 0, 0, 0)°。**rviz2 在 VS Code（snap）內建終端會立即結束**：`/snap/core20/.../libpthread.so.0: undefined symbol __libc_pthread_init`（snap 的 GTK_PATH / LOCPATH 等環境變數被繼承）。改用 ThinLinc 一般終端，或以 `env -i` 乾淨環境啟動 rviz2（同一 params file）即可；該次由 Claude 另開 rviz2（只是畫面），已連上 move_group。
+
+## Mocap follower 自動回 home（2026-10-31，Claude；使用者要求「暫停、存檔或丟棄後由程式控制回 home，不經 mocap」）
+
+- 觸發：recorder 停止 episode（存檔或丟棄，含過短丟棄、Y reset）時發布 `/recorder/episode_end`（"saved"/"discarded"，在編碼前）；follower stdin `h`。`--no-home-after-episode` 關閉自動。**使用者決定（同日）：rebel_demo 暫停（SPACE）不回 home**（曾短暫實作，已移除；測試確認暫停時手臂不動、不呼叫 ~/home）。
+- 動作：follower 自行以 joint space 移到 `--home-deg`（預設 0 0 60 0 50 0 = 使用者 rebel_demo 的 home_deg），**忽略 mocap 目標**，`--home-vel-deg` 10°/s，沿用加速度 / 收尾減速 / leash 10° / stall（手臂不跟隨 → 停止並 disable）。只在 enabled 時；`d`、其他命令 publisher → 滑行停止；joint states 逾時 → 取消，不會自動續行。命令到 home 且手臂 < 1°（或 2 s 後）即結束，之後照舊：mocap 目標回到手臂 3° 內才再跟隨。
+- 同時呼叫 rebel_demo `~/home`（Trigger）：rebel_demo 恢復時以自己的上一個命令（q_cmd）為參考，若只移手臂，恢復後目標仍在舊位置、follower 會一直等待。服務不在時只警告，手臂照樣回 home。
+- 注意：home_deg 必須與 rebel_demo 相同（MoveIt SRDF 的 home 是 J3 65°，不同）。
+- 驗證（假 ReBeL、domain 97/98）：新增 4 項（存檔 → 手臂自行回 home 且 rebel ~/home 被呼叫、home 後遠目標不跟隨、目標回來再跟隨；rebel 暫停 → 不回 home；--no-home-after-episode 時不回、`h` 回；`d` 中途停止）。修正既有 flaky 測試 test_disabled_sends_nothing（固定等 0.5 s 與 stdin 執行緒競態，原版 4 次失敗 1 次）。follower 15 項、recorder 端對端（本機 `.venv_record` + Isaac Sim 6.0.1 rclpy，含 episode_end 順序）、dataset / record_load 測試皆通過。未在實機驗證。
+- 本機（ai-iece）：`.venv_record` 已重建（LeRobot 0.5.1），錄製以 `ISAAC_SIM=~/isaacsim` 執行；相機需 `video` 群組（已加入，未重新登入前用 `sg video -c "…"`）；`config/real_cameras.json` wrist_right 改為 USB 埠 3-9.3（未經使用者確認是右臂）。
+- 2026-10-31 資料集 `dataset/mocap_right_1` 修復（使用者要求改成 5 個 episode）：錄製進行中資料夾被刪除（02:06 前後；原因未確認，recorder / LeRobot 皆不刪 episode 資料），episode 0（243 幀）與 meta/episodes、tasks.parquet 遺失，載入時 LeRobot 改連 Hub → "offline mode is enabled" 錯誤。先完整備份至 `dataset_backup/mocap_right_1_before_renumber`（已加入 .gitignore，213 MB），再將 episode 1–5 重新編號為 0–4、global index −243、file-001 → file-000、重建 tasks.parquet / info.json / stats.json（LeRobot aggregate_stats）。驗證：LeRobot 離線載入 5 episodes / 5515 幀、每個 episode 首尾幀解碼兩路影片成功。注意：此資料集的 `wrist_right` 影片實為左腕相機（設定已改：wrist_right = USB 3-9.2、wrist_left = 3-9.3）。
+- 2026-11-04（ai-iece）：USB 網卡未接，機器人線改接內建 `eno1`（Aquantia），本次 link 100 Mbit/s 穩定（開機以來 1 次 carrier change、15 s ping 0 % loss）。新增 NetworkManager profile `robot-eno1`（eno1、192.168.3.54/24、never-default、ipv6 ignore），兩臂 ping 與 CRI 3920 可達；所有外部連線仍走 eno2。還原：`nmcli con up "Wired connection 1"`。同日檢查：Gemini 336 經 USB 3 hub（4-4）串流約 9 s 後斷線重接 → 建議直插 PC；OptiTrack driver lifecycle `inactive`（無 /rigid_bodies）。
+
+## 分支 `fani8j-controller`：採用 fani8j 的實機控制器（2026-11-04，Claude；使用者要求「另開分支，main 永遠是穩定版、不得 commit 到 main」）
+
+- 背景：使用者回報 mocap 遙控時部分動作（左右、前後平移等）會抖動，要比較 fani8j 分支（github.com/fani8j/robot_remote `fani8j/real-teleop-recording-updates`，f083a24，main 78a48dd 之上一個 commit）的控制器差異。
+- 差異：(1) igus driver：本機 main 用 Igus_rebel cc0e2b6，jog % = 2.0 × deg/s 寫死；fani8j 用 287b0186（`fani8j/jtc-tracking`），driver 參數 `jog_velocity_scale` 預設 1.65（實測每關節 0.600 °/s per jog %，精確值 1.667；2.0 讓手臂比命令快約 20 %）。(2) JTC 增益：main `gains:=standard` p1/ff0.4（乘 1.2 後實效 p1.2/ff0.48）；fani8j 預設 `tuned` p3/ff0.6、六軸、scale 1.65，以 MoveIt 式**規劃軌跡**在兩臂實機驗證，**從未以 30 Hz 單點串流（本專案 mocap follower / Quest teleop 的方式）在實機跑過**。(3) 新 driver 另有執行期參數 `jtc_jog_deadband_percent`（預設 0）、`~/cri_diagnostics`。(4) teleop 串流限制（加速度 0.52 / 收尾 0.3 / leash 10°）兩邊相同。
+- 2026-11-04 15:28–16:24 mocap trace（`latest_run/mocap_follower_trace.csv`，約 20 分鐘 follow，main 的 driver）：follower 命令平滑（加速度變號 ≤ 0.4 次/s）；手臂在 < 1 Hz 緊跟命令；手臂量測速度 p95 達 21–22°/s，超過命令上限 15°/s（符合 2.0 比例）；|J5| < 40° 時 mocap IK 要求 J4/J6 約 27–30°/s（其他時候 13–14°/s），follower 等比例限速使整隻手臂忽快忽慢（IK 奇異點，非 PID）。trace 為 30 Hz、STATUS 約 40 Hz，> 5 Hz 的振動無法判斷。
+- 做法（main 不受影響）：分支 `fani8j-controller`（自 main 78a48dd）；新 driver 另建在 **`igus_ws_jtc/`**（本機 clone Igus_rebel → 287b0186，套用 `igus_ws/patches/Igus_rebel-*.patch`，SRDF 以 `git apply -3`；`env -i` 乾淨環境 colcon build，6 個套件成功）。`igus_ws/`（cc0e2b6）完全未動，main 照舊使用。從 fani8j 取 `config/real_controller_gains.json`（`tuned` + 各 profile 釘 `jog_velocity_scale`）、`real_robot/dual_arm_driver.launch.py`（傳 `jog_velocity_scale:=`、預設 `gains:=tuned`）、`setup/install_ros_ws.sh`（pin 287b0186）。新增保護：profile 要求的 scale ≠ 2.0 而 source 的是舊 driver 時 launch 直接拒絕（否則 tuned 會以 2.0 跑成實效 p3.6/ff0.72，未測）；scale = 2.0（standard / responsive）在舊 driver 上照舊執行（GUI 預設 standard 不受影響）。
+- 切換：新控制器 `git switch fani8j-controller` + `source igus_ws_jtc/install/setup.bash`，`ros2 launch real_robot/dual_arm_driver.launch.py arms:=right`（預設 tuned；加 `gains:=standard` = 新 driver 但與今天相同的增益與比例）；回穩定版 `git switch main` + `source igus_ws/install/setup.bash`。其他終端（rebel_demo、鍵盤、follower、recorder）不變。
+- 驗證（無實機，domain 97、127.0.0.1、enable_motors false）：igus_ws_jtc + tuned → log「gains tuned, jog_velocity_scale 1.65」、driver「jog_velocity_scale 1.6500」、參數檔六軸 p3/ff0.6；standard → scale 2.0、p1/ff0.4；舊 igus_ws + tuned → launch 拒絕並提示。
+- **未驗證**：tuned 從未以 30 Hz 串流在實機跑過（先前 scale 2.0 時 p4 長程過衝 7°+）。下一步（需操作者在急停旁授權）：`real_robot/j3j5_step_test.py --arm right --profiles normal stop`（tuned），再短時間 mocap，與上述 trace 基準比較（量測速度 p95 vs 15°/s、lag p95 2.5–3.8°、有無「arm does not follow」）；若振盪或過衝，回 `gains:=standard`，或另加「1.65 + 較低增益」profile。
+
+## 資料集 `mocap_right_1` 消失與重建（2026-11-13，Claude）
+
+- 現象：`dataset/` 為空（目錄時間 2026-11-13 11:54），先前修復的 `dataset/mocap_right_1`（5 episodes）與追蹤中的 `dataset/dual_rebel_task` 都不見。垃圾桶空、機器上沒有其他副本；ZFS 無問題（rpool 剩 238 GB、全部 quota/refquota 為 none、無 snapshot）。**刪除原因未查明**（程式碼、shell 歷史皆無痕跡）。
+- 重建：從 `dataset_backup/mocap_right_1_before_renumber`（唯讀、重建前後 sha256 相同）複製，episode 1–5 → 0–4、global index −243、file-001 → file-000，重建 stats.json / tasks.parquet / info.json。結果 5 episodes / 5515 幀（1169 / 1198 / 1080 / 1061 / 1007）；`recording/dataset_check.py` 判為可接續的 `dataset`；LeRobot 離線載入成功；每個 episode 首尾幀在兩路影片皆可解碼。**原 episode 0（243 幀）無法恢復。** 腳本不在專案內（一次性）。
+- `dataset/dual_rebel_task` 未還原（可 `git checkout -- dataset/dual_rebel_task`）。建議另存一份資料集副本到專案外。
+
+## 旗片分段標記：`flaps_sequence.yaml` + 錄製終端按 `n`（2026-11-13，Claude；分支 `recorder_flap_annotated`）
+
+- 使用者需求：箱子四片蓋的示範，每完成一片要能在資料集裡留下時間點。邏輯（使用者確認）：每次開始錄製時**已經是第 1 片**（不必按鍵）；錄製終端（`run_record.sh` → `recording/record_dataset.py`）按 **`n` + Enter = 這片完成、換下一片**（四片只按 3 次 `n`）；最後一片在存檔時結束。暫停 mocap（手臂停住）後再按 `n`。
+- **資料格式改為 `additional_references/` 參考錄製程式的格式**（使用者決定，同日；初版的 `meta/demo_events.jsonl` 旁檔與 `u` 復原已移除，未曾用於實際資料集）。參考檔 `additional_references/robot_remote-main/record_dataset.py` = commit af0b813 的舊版（只能錄模擬：讀 `/dual_arm/isaac_joint_states` 與 `/clock`）+ `--subtasks`；只採用其格式，未複製該檔。
+- **只在加 `--flaps-sequence` 時啟用**（單獨給 = `config/flaps_sequence.yaml`；或 `--flaps-sequence PATH`）。沒給時每幀 task = `--task`，`n` 只印提示（GUI 啟動的錄製程序 stdin 是管線、送不了 `n`，其他任務也沒有蓋子，所以不預設開啟）。
+- `config/flaps_sequence.yaml`：每步一句指令（`1: open the back flap` … `4: open the left flap`，使用者自行改順序與文字）。啟動時驗證（步號 1..N 連續、值須為非空文字、不重複），錯誤在開相機前就以訊息停止。
+- `recording/flap_segments.py`（純標準函式庫 + PyYAML）：`FlapTracker`（`start` / `next` / `finish` / `discard`，目前句子 `task`）與 `write_marks`。`n` 在最後一片或沒在錄製時只印警告。
+- 儲存（LeRobot 可直接讀）：每幀的 LeRobot `task` = 當時那一片的句子（取代 `--task`），所以 parquet 的 `task_index` 逐幀不同、`meta/tasks.parquet` 列出句子、`LeRobotDataset(...)[i]["task"]` 直接得到句子；不改 feature schema（LeRobot 0.5.1 `dataset_writer.py` 本來就支援同一 episode 多個 task），既有資料集仍可接續。存檔成功**之後**另在 `<dataset>/meta/subtask_marks.jsonl` 加一行 `{"episode_index", "subtasks"（到達的各片句子）, "start_frames"（各片起始幀，第一個為 0）}`（append + fsync，與參考程式相同）。捨棄 / Y 重置 / 太短的 episode 不留任何東西；下一個 episode 重新從第 1 片開始。存檔時印 `flaps: N of M reached`，少於全部時提示可能漏按 `n`。
+- 接續時若既有 episode 有／無旗片標記與本次不同（看 `subtask_marks.jsonl` 是否存在），印 WARNING 建議換 `--name`（例：`mocap_right_1` 的 5 個 episode 全是 "open the box flaps"）。
+- 注意：分界點是「按下 `n` 的時刻」＝暫停之後，所以每片尾端包含暫停；漏按一次 `n` 會讓該 episode 之後的旗片標籤全部錯位。
+- 驗證：`tests/test_flap_segments.py` 11 項（YAML 驗證、`FlapTracker`、marks 檔格式（含非 ASCII 句子）；以真正的 `run_record.sh --source real`（無相機、假 driver / action topic、domain 86）用終端按鍵驅動，再以 `LeRobotDataset` 讀回每幀 task：四片 + 多按一次 `n` + 錄製前按 `n`、沒按 `n` = 整段第 1 片、`n` 後 `d` 捨棄不留行、接續（`--flaps-sequence` 單獨 = 專案 YAML）episode 序號延續且從第 1 片開始、不加 `--flaps-sequence` 時每幀 = `--task` 且無 marks 檔、混用警告、壞 YAML 在建立資料集前停止）。既有 `test_real_recording` / `test_dataset_location` / `test_record_load` 仍通過。未在實機 mocap 錄製驗證。
+
+## 相機命名視窗 `recording/run_camera_setup.sh`（2026-11-13，Claude）
+
+- 使用者需求：一個視窗找出所有相機、顯示畫面，每台下面一個下拉選單選名稱（wrist_left / wrist_right / head / knife / (not used)），存檔覆蓋目前的相機設定。
+- `recording/camera_setup_gui.py`（tkinter + OpenCV，以 `.venv_record` 的 Python 執行，與 `run_cameras.sh` 相同）：每台相機一格（即時畫面約 10 Hz、裝置 / port / serial / 速度、目前設定中的名稱、實際開啟的格式）。選了別台已有的名稱 → 兩台互換。**Save** 覆蓋 `config/real_cameras.json`，舊檔留在 `real_cameras.json.bak`（已加入 .gitignore），原子寫入。重名時拒絕存檔。
+- 存檔規則：位置欄位沿用 `real_cameras.node_spec()`（Orbbec = serial + interface、ARC = USB port + usb_id）；格式（MJPG / 尺寸 / fps / decode_fps / rotate）跟著實體相機走（先取原本指向它的設定，再取同型號，最後取能出圖的通用格式）；名稱沒換相機型號時保留原 label。設定中有、但目前沒接上的名稱原樣保留（視窗底部列出）；被改成 (not used) 的已接相機，其名稱會刪除。
+- 每台 USB 相機只開一個彩色串流（設定中的 interface，否則最小的），避免開到 Gemini 305 的 interface 6（曾使 interface 4 不出圖直到重插）；`--all-interfaces` 全部顯示。相機依序開啟（不同時），錄製程序在用的相機會顯示錯誤。
+- `real_cameras.colour_nodes()` 改用 VIDIOC_ENUM_FMT ioctl 判斷彩色格式（只列格式，不串流）；ai-iece 沒有安裝 `v4l2-ctl`，舊版在此機的 `run_cameras.sh --list` 會什麼都列不出來。開不了節點時才退回 v4l2-ctl。
+- 驗證：`tests/test_camera_setup.py` 8 項（.venv_record 與系統 Python 皆通過）：設定比對、每台只開一個介面、左右互換保留各自格式與 label、(not used) 刪名、重名拒絕、名稱換到不同型號時取該相機格式、存檔備份與 recorder 可讀；隱藏視窗以 3 個影片檔當相機：畫面出現、互換、存檔。截圖檢查版面。**此時本機沒有接任何相機（/dev/video* 不存在），未以實體相機驗證**（ioctl 格式判斷、實際開啟、USB 頻寬）。
+- 注意：目前 `config/real_cameras.json` 的 `wrist_right` 為 `usb_port 3-9`（看起來是 hub 本身而非 hub 上的埠），與 10-31 的紀錄不符；接上相機後用此視窗確認。
