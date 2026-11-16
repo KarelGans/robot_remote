@@ -33,7 +33,8 @@ def old_config():
         "wrist_left": {"label": "Left wrist (ARC USB camera)", "usb_port": "3-9.2", "usb_id": ARC,
                        "fourcc": "MJPG", "width": 640, "height": 480, "fps": 120, "decode_fps": 60},
         "wrist_right": {"label": "Right wrist (ARC USB camera)", "usb_port": "3-9.3", "usb_id": ARC,
-                        "fourcc": "MJPG", "width": 640, "height": 480, "fps": 120, "decode_fps": 60},
+                        "fourcc": "MJPG", "width": 640, "height": 480, "fps": 120, "decode_fps": 60,
+                        "controls": {"power_line_frequency": 2, "auto_exposure": 1, "exposure_time_absolute": 167}},
         "head": {"label": "Third-person (Gemini 336)", "serial": "CP96563000LY", "interface": 4,
                  "fourcc": "MJPG", "width": 640, "height": 480, "fps": 30},
         "knife": {"label": "Knife close-up (Gemini 305)", "serial": "CV27561000GA", "interface": 4,
@@ -72,6 +73,9 @@ class CameraSetupLogicTest(unittest.TestCase):
         self.assertEqual(new["wrist_right"]["usb_port"], "3-9.2")
         self.assertEqual((new["wrist_left"]["fps"], new["wrist_left"]["decode_fps"]), (120, 60))
         self.assertEqual(new["wrist_left"]["label"], "Left wrist (ARC USB camera)")  # same camera model: label kept
+        # camera settings belong to the physical camera (port 3-9.3): they move with it to its new name
+        self.assertEqual(new["wrist_left"]["controls"], self.cfg["wrist_right"]["controls"])
+        self.assertNotIn("controls", new["wrist_right"])
         self.assertEqual(new["head"]["serial"], "CP96563000LY")
         self.assertEqual(new["knife"], self.cfg["knife"])  # not connected now: kept unchanged
 

@@ -1,7 +1,7 @@
 {
-  "_comment": "Real rig USB cameras -> observation.images.<key> (recording/real_cameras.py). Orbbecs by serial + colour interface (any port); the ARC wrist cameras have no serial, so by USB port: keep them in the same ports. ARC 640x480 MJPG exists only at 120 fps: decoded at <= 60 fps. Set with recording/run_camera_setup.sh",
-  "wrist_right": {"label": "Right wrist (ARC USB camera)", "usb_port": "3-10", "usb_id": "05a3:9230", "fourcc": "MJPG", "width": 640, "height": 480, "fps": 120, "decode_fps": 60},
-  "head": {"label": "Third-person, middle (Orbbec Gemini 336 colour)", "serial": "CP96563000LY", "interface": 4, "fourcc": "MJPG", "width": 640, "height": 480, "fps": 30},
-  "wrist_left": {"label": "Left wrist (ARC USB camera)", "usb_port": "3-9.2", "usb_id": "05a3:9230", "fourcc": "MJPG", "width": 640, "height": 480, "fps": 120, "decode_fps": 60},
+  "_comment": "Real rig USB cameras -> observation.images.<key> (recording/real_cameras.py). Orbbecs by serial + colour interface (any port); the ARC wrist cameras have no serial, so by USB port: keep them in the same ports. ARC 640x480 MJPG exists only at 120 fps: decoded at <= 60 fps. 'controls' = camera settings applied on every open (run_cameras.sh --controls lists them): 60 Hz anti-flicker; head exposure fixed at 8.3 ms (= its auto value in the lab, one 120 Hz light-flicker period). Set with recording/run_camera_setup.sh",
+  "wrist_right": {"label": "Right wrist (ARC USB camera)", "usb_port": "3-10", "usb_id": "05a3:9230", "fourcc": "MJPG", "width": 640, "height": 480, "fps": 120, "decode_fps": 60, "controls": {"power_line_frequency": 2}},
+  "head": {"label": "Third-person, middle (Orbbec Gemini 336 colour)", "serial": "CP96563000LY", "interface": 4, "fourcc": "MJPG", "width": 640, "height": 480, "fps": 30, "controls": {"power_line_frequency": 2, "auto_exposure": 1, "exposure_time_absolute": 83}},
+  "wrist_left": {"label": "Left wrist (ARC USB camera)", "usb_port": "3-9.2", "usb_id": "05a3:9230", "fourcc": "MJPG", "width": 640, "height": 480, "fps": 120, "decode_fps": 60, "controls": {"power_line_frequency": 2}},
   "knife": {"label": "Knife close-up, left arm (Orbbec Gemini 305 colour)", "serial": "CV27561000GA", "interface": 4, "fourcc": "MJPG", "width": 640, "height": 480, "fps": 30}
 }

@@ -58,7 +58,8 @@ class FlapSequenceFileTest(unittest.TestCase):
             self.assertIn(w, str(cm.exception))
 
     def test_project_file_is_valid(self):
-        self.assertEqual(fs.load_sequence(fs.DEFAULT_SEQUENCE), SENTENCES)
+        # the operator edits the order per dataset (config/flaps_sequence.yaml); any order of the four flaps is fine
+        self.assertEqual(sorted(fs.load_sequence(fs.DEFAULT_SEQUENCE)), sorted(SENTENCES))
 
     def test_orders_by_step_number_not_by_line(self):
         self.assertEqual(self.load("2: open B\n1: open A\n3:   open   C  \n"), ["open A", "open B", "open C"])

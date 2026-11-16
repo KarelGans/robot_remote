@@ -33,7 +33,9 @@ import real_cameras as rc
 
 NOT_USED = "(not used)"
 DEFAULT_NAMES = ["wrist_left", "wrist_right", "head", "knife"]
-FORMAT_KEYS = ("fourcc", "width", "height", "fps", "decode_fps", "rotate")
+# picture settings that belong to the physical camera: they move with it when names are swapped, and the preview
+# uses them ("controls" = exposure / anti-flicker etc., see real_cameras.py)
+FORMAT_KEYS = ("fourcc", "width", "height", "fps", "decode_fps", "rotate", "controls")
 FALLBACK_FORMATS = [  # tried in order when no config entry knows this camera model
     {"fourcc": "MJPG", "width": 640, "height": 480, "fps": 30},
     {"fourcc": "MJPG", "width": 640, "height": 480, "fps": 120, "decode_fps": 60},  # ARC: 640x480 MJPG only at 120
@@ -42,7 +44,8 @@ FALLBACK_FORMATS = [  # tried in order when no config entry knows this camera mo
 PREVIEW_W, PREVIEW_H = 320, 240
 COMMENT = ("Real rig USB cameras -> observation.images.<key> (recording/real_cameras.py). Orbbecs by serial + colour "
            "interface (any port); the ARC wrist cameras have no serial, so by USB port: keep them in the same ports. "
-           "ARC 640x480 MJPG exists only at 120 fps: decoded at <= 60 fps. Set with recording/run_camera_setup.sh")
+           "ARC 640x480 MJPG exists only at 120 fps: decoded at <= 60 fps. 'controls' = camera settings applied on "
+           "every open (run_cameras.sh --controls lists them). Set with recording/run_camera_setup.sh")
 
 
 # ---------------------------------------------------------------- logic (no Tk: unit-tested)
@@ -195,7 +198,8 @@ class Tile:
             try:
                 cam = rc.RealCamera(self.node["port"], self.node["dev"], fmt.get("width", 640),
                                     fmt.get("height", 480), fmt.get("fps", 30), fmt.get("fourcc", "MJPG"),
-                                    fmt.get("decode_fps"), fmt.get("rotate", 0), open_timeout=4.0).open()
+                                    fmt.get("decode_fps"), fmt.get("rotate", 0), open_timeout=4.0,
+                                    controls=fmt.get("controls")).open()
                 if stop.is_set():  # the window closed / rescanned meanwhile
                     cam.close()
                     return
@@ -224,8 +228,14 @@ class Tile:
         self.photo = tk.PhotoImage(data=base64.b64encode(png.tobytes()))
         self.picture.configure(image=self.photo, text="")
         f = self.fmt
+        probs = self.cam.control_problems
         self.fmt_label.configure(text=f"{f.get('fourcc')} {w}x{h} @ {f.get('fps')}"
-                                      + (f" (rotate {f['rotate']})" if f.get("rotate") else ""))
+                                      + (f" (rotate {f['rotate']})" if f.get("rotate") else "")
+                                      + (f" + {len(self.cam.controls)} settings" if self.cam.controls else "")
+                                      + (f", {len(probs)} refused" if probs else ""),
+                                 foreground="#a00" if probs else "#555")
+        if probs and "refused:" not in self.info.cget("text"):
+            self.info.configure(text=self.info.cget("text") + "\nrefused: " + "; ".join(probs)[:200])
 
     def close(self):
         if self.cam is not None:

@@ -33,6 +33,7 @@ one line {"episode_index", "subtasks", "start_frames"} is appended to <dataset>/
 """
 
 import argparse
+import json
 import queue
 import sys
 import threading
@@ -312,7 +313,10 @@ def main():
         cameras = real_cameras.open_cameras(args.cameras, cam_cfg)
         args.image_shapes = {k: cam.latest()[0].shape[:2] for k, cam in cameras.items()}
         for k, cam in cameras.items():
-            print(f"[rec] camera {k}: {cam.device}  {args.image_shapes[k][1]}x{args.image_shapes[k][0]}", flush=True)
+            print(f"[rec] camera {k}: {cam.device}  {args.image_shapes[k][1]}x{args.image_shapes[k][0]}"
+                  + (f"  settings {json.dumps(cam.controls_applied)}" if cam.controls else ""), flush=True)
+            for prob in cam.control_problems:
+                print(f"[rec] WARNING: camera {k} setting {prob}", flush=True)
     else:
         args.cameras = list(CAMERAS) if args.cameras is None else args.cameras
         unknown = [k for k in args.cameras if k not in CAMERAS]

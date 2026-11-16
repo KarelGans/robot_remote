@@ -398,3 +398,25 @@
 - `real_cameras.colour_nodes()` 改用 VIDIOC_ENUM_FMT ioctl 判斷彩色格式（只列格式，不串流）；ai-iece 沒有安裝 `v4l2-ctl`，舊版在此機的 `run_cameras.sh --list` 會什麼都列不出來。開不了節點時才退回 v4l2-ctl。
 - 驗證：`tests/test_camera_setup.py` 8 項（.venv_record 與系統 Python 皆通過）：設定比對、每台只開一個介面、左右互換保留各自格式與 label、(not used) 刪名、重名拒絕、名稱換到不同型號時取該相機格式、存檔備份與 recorder 可讀；隱藏視窗以 3 個影片檔當相機：畫面出現、互換、存檔。截圖檢查版面。**此時本機沒有接任何相機（/dev/video* 不存在），未以實體相機驗證**（ioctl 格式判斷、實際開啟、USB 頻寬）。
 - 注意：目前 `config/real_cameras.json` 的 `wrist_right` 為 `usb_port 3-9`（看起來是 hub 本身而非 hub 上的埠），與 10-31 的紀錄不符；接上相機後用此視窗確認。
+
+## 相機參數（曝光／抗閃爍）：`controls`（2026-11-13，Claude；分支 `change_camera_params`）
+
+- 使用者回報：相機測試畫面正常，錄製的影片卻有黑色橫紋、像低快門。分析 `/media/ai/aipc/Karel/Mocap/Dataset/new_mocap_allflaps1`（實機 mocap，head + wrist_right）：head 白牆上的暗帶在左右牆與箱子／手臂同一列（相關 0.75）、間距約 148 列、幾乎不動 → 60 Hz 市電燈光的 120 Hz 閃爍 × rolling shutter，不是 AV1 壓縮。wrist 為運動模糊（曝光長、手臂在動；測試時相機靜止所以清楚）。
+- 相機實際設定（`--controls` 讀取，GUI 串流中）：head（Gemini 336）`auto_exposure 0`（= 全自動；`exposure_time_absolute 156` 為 inactive，先前說「固定 15.6 ms」有誤）、`power_line_frequency 2`（60 Hz）仍有條紋；wrist（ARC）`auto_exposure 3`、`power_line_frequency 1`（50 Hz，台灣應為 60 Hz）、`exposure_dynamic_framerate 1`（可降幀拉長曝光）。
+- 實作：`config/real_cameras.json` 每台可加 `"controls": {名稱: 整數}`（名稱同 `v4l2-ctl -l`）。`real_cameras.RealCamera` 在串流開始（第一幀）後以 VIDIOC_S_CTRL 套用、讀回；模式類（power_line_frequency、auto_exposure、exposure_dynamic_framerate …）先套用；不存在／超出範圍／被拒／讀回不同 → `control_problems`（錄製程式印 WARNING，相機照常運作）。`run_cameras.sh --controls` 列出所有設定（唯讀）；`--test` 另印「new pictures/s」與重複幀比例（`RealCamera.repeats`：與前一幀 1/64 取樣 crc32 相同）。相機命名視窗：`controls` 屬於實體相機（FORMAT_KEYS），互換名稱時跟著相機走，預覽也套用。
+- 驗證：`tests/test_camera_controls.py`（假 UVC ioctl：名稱轉換、略過 class／disabled、模式先套用使曝光被接受、各種錯誤回報、step 取整；影片檔當相機的重複幀計數）＋ `test_camera_setup` 互換時 controls 跟著相機；兩種 Python 皆通過。實體相機只做了 `--controls` 讀取。
+- 實測（同日 22:00 左右，相機命名視窗關閉後；手臂未動）：
+  - 現在 head 無論自動或手動 8.3／16.7／25 ms 都**沒有條紋**；head 自動曝光亮度 = 手動 8.3 ms（113），即自動已選 8.3 ms。head + wrist 同時開：head 30.0、wrist 47 張新畫面/s，0 % 重複，到達間隔穩定 33.4 ms。head（Gemini 336）目前接在 3-9、480 Mbit/s（USB 2），與 wrist 同 bus，但兩台同時都正常。
+  - 以真正的 recorder（私有 ROS domain 86、假關節 topic、兩台實體相機）錄 15 s：後牆條紋深度 3.4（使用者 21:3x 錄影為 17.0）→ **條紋不是錄製程式或相機設定造成，是當時現場的光源**（推測：mocap OptiTrack 相機的紅外線閃光，或當時另開的燈；未證實，需在相同條件下重錄比較）。
+  - **「head 每隔一幀相同」是 AV1 編碼現象，不是掉幀**：60 張彼此不同的 head 畫面（相鄰差 1.9）以 LeRobot 相同參數（libsvtav1、g=2、crf 30）編碼後，恰好每隔一幀解碼完全相同（30/59）——靜止區域的感測器雜訊不被編碼；有動的部分（手臂）仍有編碼（使用者錄影中成對差 0.12 而非 0）。不需修正。
+  - wrist：手動 8.3 ms 太暗（亮度 52、39 % 近黑），手動 16.7 ms 讓相機降到 28.8 fps（低於錄製 30 fps）→ 維持自動，只改抗閃爍。
+- 寫入 `config/real_cameras.json`：head `{"power_line_frequency": 2, "auto_exposure": 1, "exposure_time_absolute": 83}`（固定 8.3 ms：與目前自動相同亮度，且不會漂到不抗閃爍的曝光）；wrist_right / wrist_left `{"power_line_frequency": 2}`；knife 未改（未測）。實測套用、讀回正確，head 29.9、wrist 47.6 張新畫面/s，快照畫面正常。固定曝光的代價：現場變暗時 head 不會自動補償。
+
+## 資料集整理 + 回放視窗顯示旗片（2026-11-14，Claude；目前工作樹在分支 `change_camera_params`，未 commit）
+
+- 使用者資料集在 `/media/ai/aipc/Karel/Mocap/Dataset/new_mocap_allflaps1..4`（外接 ext4，不計 250 GB 家目錄配額）；備份在同層 `Dataset_backup/`。各資料集旗片順序不同：1 = back,front,right,left；2 = front,back,right,left；3 = front,back,left,right；4 = back,front,left,right。
+- 刪除 episode（使用者要求）：以 LeRobot `dataset_tools.delete_episodes` 寫新副本 → 驗證（剩餘 episode 的幀、標籤、畫面與原本相同；完整檢查）→ 換入，原版移到 `Dataset_backup/`。`subtask_marks.jsonl` 另行依新編號重寫。同一個影片檔中有刪除與保留的 episode 時會重新編碼該檔（畫面差 < 4/255）。
+- 已確認的 LeRobot 0.5.1 問題：`clear_episode_buffer()` 只刪 dtype=image 的暫存 PNG，video 相機的不刪；丟棄（d / Y / 太短）後若下一個存檔的 episode 較短，其影片會接上被丟棄那段的尾端（實例：allflaps1 舊 ep4 資料 243 幀、影片 2103 幀）。**錄製程式尚未修正**（待使用者決定分支）。檢查方式：episode 的影片範圍 ≠ length。
+- allflaps3 標籤修正：ep7（漏按第一個 n）在 58.7–60.6 s 唯一停頓的中點插入 back；ep0（左右之間無停頓、第三個 n 太晚）右片改由 104.1 s（推左片後手臂反向）開始——之後使用者要求刪除 ep0 與 ep10。只改 task_index、episodes 的 tasks 與 task_index 統計、stats.json task_index、marks。
+- 各 episode 的 `tasks` 清單（meta/episodes）是 LeRobot 的 `list(set())`，順序隨程序啟動而變（Python 字串雜湊隨機），回放視窗原本顯示其第一項 → 看起來每個 episode 的 task 不同。已把四個資料集的清單改為各自的旗片順序（只改 metadata；備份 `Dataset_backup/<name>_episodes_meta_before_task_order`）。
+- 回放視窗：`recording/dataset_info.py` 讀 `subtask_marks.jsonl`，episode 清單顯示旗片順序（`open front → back → left → right`），選取的 episode 在清單下方列出每片及時間；View 改用新的 `recording/view_episode.py`（呼叫 LeRobot 的 `visualize_dataset` 後在同一 Rerun recording、同一時間軸加 `task` 文字面板，依每幀 task_index）。測試 `tests/test_replay_flaps.py` 4 項（小型合成資料集、.rrd 讀回、隱藏視窗）兩種 Python 皆通過；尚未以真實資料開啟 Rerun 視窗目視確認。

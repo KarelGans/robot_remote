@@ -179,6 +179,11 @@ Stop the follower with `q`, the others with Ctrl+C. View: `./launcher/run_replay
   - The boundary is when `n` was typed, i.e. after the pause. Without `--flaps-sequence` every frame gets `--task` and
     `n` is ignored. Keep flap-labelled and unlabelled episodes in separate datasets (the recorder warns when they would
     mix, e.g. resuming `mocap_right_1` with `--flaps-sequence`).
+  - The replay window (`./launcher/run_replay_gui.sh DATASET`) lists each episode with its flap order
+    (`open front → back → left → right`; fewer = a missed `n`), shows the selected episode's flaps with their times
+    below the list, and **View** adds a `task` panel to the LeRobot viewer that changes with the playback.
+  - LeRobot stores each episode's `tasks` list (meta/episodes) as an unordered set; it says nothing about the order of
+    the flaps. The order is in the per-frame task and in `subtask_marks.jsonl`.
 - **Driver**: `igus_ws_jtc` = Igus_rebel 287b0186 with the `tuned` gains, on branch `fani8j-controller` only; on `main`
   source `igus_ws/install/setup.bash` instead (old driver, `gains:=standard`). The launch refuses `tuned` with the old
   driver. `gains:=standard` on the new driver = the old behaviour.
@@ -190,6 +195,16 @@ Stop the follower with `q`, the others with Ctrl+C. View: `./launcher/run_replay
   and a name drop-down (`wrist_left`, `wrist_right`, `head`, `knife`, `(not used)`); picking a name another camera has
   swaps the two. **Save** overwrites `config/real_cameras.json` (old file → `real_cameras.json.bak`). Close the recorder
   first. The wrist cameras are stored by USB port, so keep them in the same ports afterwards.
+- **Camera settings** (exposure, anti-flicker …): a camera entry in `config/real_cameras.json` may have
+  `"controls": {"power_line_frequency": 2, "auto_exposure": 1, "exposure_time_absolute": 167}`; they are applied every
+  time the camera opens (recorder, `run_cameras.sh`, camera window) and read back; a refused one prints a WARNING and the
+  camera still runs. `./recording/run_cameras.sh --controls --cameras head wrist_right` lists every setting with its
+  range (read only, works while the cameras stream). Horizontal dark bands on the white walls = the 120 Hz flicker of the
+  room lights (60 Hz mains): fix the exposure to a multiple of 8.33 ms (`exposure_time_absolute` is in 0.1 ms: 83, 167,
+  250) with `auto_exposure` 1 (manual), and set `power_line_frequency` 2 (60 Hz). `--test` also prints how many new
+  pictures per second each camera really sends (a camera can repeat frames when its exposure is long). In a recorded
+  video, a still scene shows every second frame identical: the AV1 encoding (keyframe every 2 frames) drops the sensor
+  noise of the in-between frame. That is not a lost picture; moving parts are still stored.
 - **Cameras**: always pass `--cameras` (without it the test opens every configured camera, also unplugged ones). The
   Gemini 336 belongs on a USB 3 port (5000 Mbit/s); on USB 2 it shares the bus with the ARC wrist camera, which then
   drops out and the recorder writes a frozen wrist image (`stale: wrist_right` in the `[rec] ●` line → `d`, restart the
@@ -207,8 +222,8 @@ Stop the follower with `q`, the others with Ctrl+C. View: `./launcher/run_replay
 | `recording/run_camera_setup.sh` | Real cameras: live picture of each + name drop-down; Save writes `config/real_cameras.json`. |
 | `recording/run_record.sh --name N --task "…" [--source real] [--flaps-sequence]` | Recorder. Keyboard fallback: Enter = start/save, d = discard, n = next flap (with `--flaps-sequence`), q = quit. |
 | `latest_run/` | Newest session only, emptied on every launcher Start: `<process>.log` copies and `teleop_trace.csv` (per tick and arm: Quest hand, grip, target, IK, joint command sent, measured joints, lag, which limit acted, log messages). Terminal runs overwrite the trace too (`--trace ''` = off). Timestamped logs stay in `logs/`. |
-| `recording/run_cameras.sh --list / --snapshot / --test 10` | Real rig USB cameras: find nodes, save one JPEG per configured camera (`logs/camera_snapshots/`), measure fps together. |
-| `launcher/run_replay_gui.sh [dataset folder]` | Playback window: choose a dataset folder + episode, then **View** (LeRobot viewer / Rerun) or **Replay in Isaac**. |
+| `recording/run_cameras.sh --list / --snapshot / --test 10 / --controls` | Real rig USB cameras: find nodes, save one JPEG per configured camera (`logs/camera_snapshots/`), measure fps and repeated frames together, list camera settings. |
+| `launcher/run_replay_gui.sh [dataset folder]` | Playback window: choose a dataset folder + episode (with its task / flap order), then **View** (LeRobot viewer / Rerun, plus a `task` panel) or **Replay in Isaac**. |
 | `recording/run_replay.sh --path <dataset folder> --episode K` | Replays recorded actions into Isaac and compares with recorded states (alignment check). |
 | `quest_teleop/run_teleop_viz.sh` | RViz view of the teleop frames (arm bases, control point, hand-motion axes). |
 | `dual_arm_sim/start_right_arm_moveit.sh` | MoveIt/RViz planning for the right arm (do not run together with Quest teleop). |

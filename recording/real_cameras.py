@@ -13,21 +13,30 @@ recorder starts (never /dev/videoN: it renumbers on every replug):
   wrist_left / wrist_right = the wrist cameras, head = third-person view in the middle (same key as the sim's head
   camera), knife = close-up of the knife. Only the colour (UVC) stream is read; depth would need pyorbbecsdk.
 
+  "controls": {"power_line_frequency": 2, "auto_exposure": 1, "exposure_time_absolute": 167}
+      optional camera settings (V4L2 controls, names as `--controls` / v4l2-ctl -l print them), applied every time the
+      camera is opened and read back; a refused one is reported, the camera still runs. Mode switches (auto_exposure,
+      power_line_frequency, ...) are applied first. Example above: fixed exposure 16.7 ms = two periods of the 120 Hz
+      flicker of 60 Hz mains lights, so the lights cannot paint horizontal bands into the picture.
+
 Each camera runs a reader thread that keeps only the newest decoded frame and its capture time (time.monotonic()).
 A camera that stops producing frames is reported stale by latest(), never blocks the caller.
 
   recording/run_camera_setup.sh                      # window: live picture + name drop-down per camera, Save
   recording/run_cameras.sh --list                    # every V4L2 colour node with its stable paths
+  recording/run_cameras.sh --controls [--cameras K]  # settings of the configured cameras (value, range, default)
   recording/run_cameras.sh --snapshot [--all]        # one JPEG per configured camera (--all: + unconfigured nodes)
-  recording/run_cameras.sh --test 10                 # all configured cameras together for 10 s: fps / gaps
+  recording/run_cameras.sh --test 10                 # all configured cameras together for 10 s: fps / gaps / repeats
 """
 
 import argparse
 import glob
 import json
 import os
+import re
 import threading
 import time
+import zlib
 from pathlib import Path
 
 import cv2
@@ -88,8 +97,13 @@ class RealCamera:
     """One V4L2 camera: open, configure, read continuously in a thread; latest() returns (rgb, capture_time)."""
 
     def __init__(self, key, device, width=640, height=480, fps=30, fourcc="MJPG", decode_fps=None, rotate=0,
-                 open_timeout=5.0):
+                 open_timeout=5.0, controls=None):
         self.key, self.device = key, str(device)
+        self.controls = dict(controls or {})   # wanted camera settings, applied in open()
+        self.controls_applied = {}              # what the camera reports after setting them
+        self.control_problems = []              # settings the camera refused / changed (the camera still runs)
+        self.repeats = 0                        # decoded frames identical to the one before (camera sent it twice)
+        self._last_sig = None
         self.width, self.height, self.fps, self.fourcc = int(width), int(height), float(fps), fourcc
         # decode at most this often (grab() still drains every frame so the buffer never ages); None = every frame
         self.decode_period = 0.0 if not decode_fps else 1.0 / float(decode_fps)
@@ -145,6 +159,9 @@ class RealCamera:
                                       "Orbbecs must link at 5000 Mbit/s (run_cameras.sh --list), else they also "
                                       "use the 480 Mbit/s USB 2 side")
             time.sleep(0.02)
+        if self.controls and not self.is_file:
+            # once the stream runs (some cameras reset their settings when streaming starts)
+            self.controls_applied, self.control_problems = set_controls(self.device, self.controls)
         return self
 
     def _loop(self):
@@ -171,6 +188,10 @@ class RealCamera:
             if not ok or bgr is None or bgr.ndim != 3:
                 continue
             last_decode = t
+            sig = zlib.crc32(np.ascontiguousarray(bgr[::8, ::8]).tobytes())  # 1/64 of the pixels: cheap
+            if sig == self._last_sig:
+                self.repeats += 1  # sensor noise makes real new frames differ; identical = the same frame again
+            self._last_sig = sig
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             if self.rotate is not None:
                 rgb = cv2.rotate(rgb, self.rotate)
@@ -206,7 +227,8 @@ def open_cameras(keys, config=None) -> dict:
         for k in keys:
             c = config[k]
             cams[k] = RealCamera(k, resolve_device(c), c.get("width", 640), c.get("height", 480), c.get("fps", 30),
-                                 c.get("fourcc", "MJPG"), c.get("decode_fps"), c.get("rotate", 0)).open()
+                                 c.get("fourcc", "MJPG"), c.get("decode_fps"), c.get("rotate", 0),
+                                 controls=c.get("controls")).open()
     except Exception:
         for cam in cams.values():
             cam.close()
@@ -237,6 +259,98 @@ def pixel_formats(dev) -> list[str]:
     finally:
         os.close(fd)
     return out
+
+
+VIDIOC_QUERYCTRL = 0xC0445624  # _IOWR('V', 36, struct v4l2_queryctrl), sizeof = 68
+VIDIOC_G_CTRL = 0xC008561B     # _IOWR('V', 27, struct v4l2_control), sizeof = 8
+VIDIOC_S_CTRL = 0xC008561C     # _IOWR('V', 28, struct v4l2_control)
+QUERYCTRL_FMT = "<II32siiiiI2I"  # id, type, name[32], minimum, maximum, step, default_value, flags, reserved[2]
+CTRL_FLAG_NEXT, CTRL_FLAG_DISABLED, CTRL_FLAG_INACTIVE, CTRL_TYPE_CLASS = 0x80000000, 0x0001, 0x0010, 6
+# applied before the others: e.g. exposure_time_absolute is only accepted once auto_exposure is manual (1)
+MODE_CONTROLS = ("power_line_frequency", "auto_exposure", "exposure_auto", "exposure_dynamic_framerate",
+                 "exposure_auto_priority", "white_balance_automatic", "white_balance_temperature_auto",
+                 "focus_automatic_continuous", "focus_auto")
+
+
+def control_name(raw) -> str:
+    """Driver name -> the name v4l2-ctl prints: 'Exposure Time, Absolute' -> 'exposure_time_absolute'."""
+    s = raw.split(b"\0", 1)[0].decode("latin-1") if isinstance(raw, bytes) else str(raw)
+    return "_".join(w for w in re.split(r"[^a-z0-9]+", s.lower()) if w)
+
+
+def _get_ctrl(fd, cid):
+    import fcntl
+    import struct
+
+    buf = bytearray(struct.pack("<Ii", cid, 0))
+    try:
+        fcntl.ioctl(fd, VIDIOC_G_CTRL, buf)
+    except OSError:
+        return None  # write-only / button controls
+    return struct.unpack("<Ii", buf)[1]
+
+
+def list_controls(dev) -> dict:
+    """{name: {id, value, min, max, step, default, inactive}} of a V4L2 node (VIDIOC_QUERYCTRL, like v4l2-ctl -l).
+    Only reads: safe while another program streams the camera."""
+    import fcntl
+    import struct
+
+    fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    out, seen, cid = {}, set(), CTRL_FLAG_NEXT
+    try:
+        for _ in range(512):
+            buf = bytearray(struct.pack(QUERYCTRL_FMT, cid, 0, b"", 0, 0, 0, 0, 0, 0, 0))
+            try:
+                fcntl.ioctl(fd, VIDIOC_QUERYCTRL, buf)
+            except OSError:
+                break  # EINVAL = no more controls
+            qid, typ, name, mn, mx, step, default, flags, _, _ = struct.unpack(QUERYCTRL_FMT, buf)
+            if qid in seen:
+                break
+            seen.add(qid)
+            cid = qid | CTRL_FLAG_NEXT
+            if typ == CTRL_TYPE_CLASS or flags & CTRL_FLAG_DISABLED:
+                continue
+            out[control_name(name)] = {"id": qid, "value": _get_ctrl(fd, qid), "min": mn, "max": mx, "step": step,
+                                       "default": default, "inactive": bool(flags & CTRL_FLAG_INACTIVE)}
+    finally:
+        os.close(fd)
+    return out
+
+
+def set_controls(dev, wanted) -> tuple:
+    """Apply {name: int} (mode switches first), read each back. Returns ({name: value now}, [problems])."""
+    import fcntl
+    import struct
+
+    have = list_controls(dev)
+    order = [k for k in MODE_CONTROLS if k in wanted] + [k for k in wanted if k not in MODE_CONTROLS]
+    applied, problems = {}, []
+    fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        for name in order:
+            value, c = wanted[name], have.get(name)
+            if c is None:
+                problems.append(f"{name}: this camera has no such setting (it has: {', '.join(sorted(have))})")
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                problems.append(f"{name}: {value!r} is not a whole number")
+                continue
+            if not c["min"] <= value <= c["max"]:
+                problems.append(f"{name}={value}: outside {c['min']}..{c['max']}")
+                continue
+            try:
+                fcntl.ioctl(fd, VIDIOC_S_CTRL, bytearray(struct.pack("<Ii", c["id"], value)))
+            except OSError as e:
+                problems.append(f"{name}={value}: refused by the camera ({e.strerror or e})")
+                continue
+            applied[name] = got = _get_ctrl(fd, c["id"])
+            if got != value:
+                problems.append(f"{name}: set {value}, the camera reports {got}")
+    finally:
+        os.close(fd)
+    return applied, problems
 
 
 def colour_nodes():
@@ -272,11 +386,13 @@ def main():
                    help="--snapshot: also probe colour nodes that are not in the config. Caution: probing the Gemini "
                         "305's second colour interface (6) left its colour stream (4) without frames until replugged")
     p.add_argument("--test", type=float, metavar="S", help="stream all configured cameras together for S seconds")
+    p.add_argument("--controls", action="store_true",
+                   help="print the settings of the configured cameras (read only; works while they stream)")
     p.add_argument("--cameras", nargs="*", help="subset of configured keys (default: all)")
     p.add_argument("--config", default=str(CONFIG))
     p.add_argument("--out", default=str(ROOT / "logs" / "camera_snapshots"))
     args = p.parse_args()
-    if not (args.list or args.snapshot or args.test):
+    if not (args.list or args.snapshot or args.test or args.controls):
         args.list = True
 
     if args.list:
@@ -287,6 +403,22 @@ def main():
     cfg = load_config(args.config) if Path(args.config).exists() else {}
     keys = args.cameras if args.cameras else list(cfg)
 
+    if args.controls:
+        for k in keys:
+            try:
+                dev = resolve_device(cfg[k])
+                ctrls = list_controls(dev)
+            except Exception as exc:
+                print(f"[cam] {k}: FAILED {exc}")
+                continue
+            wanted = cfg[k].get("controls", {})
+            print(f"[cam] {k} ({dev})" + (f"  config controls: {json.dumps(wanted)}" if wanted else ""))
+            for name, c in ctrls.items():
+                mark = ("  <- config " + str(wanted[name]) + ("" if c["value"] == wanted[name] else "  NOT APPLIED")
+                        if name in wanted else "")
+                print(f"    {name:32s} {c['value']!s:>6s}   range {c['min']}..{c['max']}  default {c['default']}"
+                      + ("  (inactive)" if c["inactive"] else "") + mark)
+
     if args.snapshot:
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
@@ -295,7 +427,9 @@ def main():
         for k in keys:
             try:
                 cam = open_cameras([k], cfg)[k]
-                time.sleep(0.5)  # let auto exposure settle
+                for prob in cam.control_problems:
+                    print(f"[cam] {k}: WARNING setting {prob}")
+                time.sleep(0.5)  # let auto exposure / new settings settle
                 rgb, _ = cam.latest()
                 cam.close()
                 cam.device = os.path.realpath(cam.device)
@@ -327,7 +461,13 @@ def main():
 
     if args.test:
         cams = open_cameras(keys, cfg)
+        for k, c in cams.items():
+            if c.controls:
+                print(f"[cam] {k:12s} settings: {json.dumps(c.controls_applied)}"
+                      + "".join(f"\n[cam] {k:12s} WARNING {p}" for p in c.control_problems))
+        time.sleep(0.5)  # new settings take a few frames
         n0 = {k: c.frames for k, c in cams.items()}
+        r0 = {k: c.repeats for k, c in cams.items()}
         gap = {k: 0.0 for k in cams}
         last = {k: c.latest()[1] for k, c in cams.items()}
         t0 = time.monotonic()
@@ -341,7 +481,9 @@ def main():
         dt = time.monotonic() - t0
         for k, c in cams.items():
             rgb, t = c.latest()
-            print(f"[cam] {k:12s} {(c.frames - n0[k]) / dt:6.1f} decoded fps  max gap {1000 * gap[k]:5.0f} ms  "
+            n, r = c.frames - n0[k], c.repeats - r0[k]
+            print(f"[cam] {k:12s} {n / dt:6.1f} decoded fps  {(n - r) / dt:6.1f} new pictures/s"
+                  f"{f' ({100 * r / max(n, 1):.0f}% repeated)' if r else ''}  max gap {1000 * gap[k]:5.0f} ms  "
                   f"age {1000 * (time.monotonic() - t):4.0f} ms  {rgb.shape[1]}x{rgb.shape[0]}  "
                   f"(device {c.actual_fps:.0f} fps){'  DEAD: ' + c.error if c.error else ''}")
             c.close()

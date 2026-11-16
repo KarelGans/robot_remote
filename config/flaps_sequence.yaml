@@ -3,7 +3,7 @@
 # Each sentence becomes the LeRobot "task" of the frames recorded while that flap is being opened.
 # An episode starts on step 1; type n + Enter in the recorder terminal when a flap is finished.
 # The last flap ends when the episode is saved. Where each flap starts: <dataset>/meta/subtask_marks.jsonl.
-1: open the back flap
-2: open the front flap
-3: open the right flap
-4: open the left flap
+1: open the front flap
+2: open the back flap
+3: open the left flap
+4: open the right flap

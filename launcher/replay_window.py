@@ -4,8 +4,11 @@
   robot_remote/launcher/run_replay_gui.sh         (or the "Play back a dataset" button in the launcher)
 
 Two ways to play an episode:
-  * View: LeRobot's own viewer (lerobot-dataset-viz, Rerun) shows the camera videos and the state/action curves.
+  * View: LeRobot's own viewer (lerobot-dataset-viz, Rerun) shows the camera videos and the state/action curves,
+    plus a "task" panel that follows the playback (which flap is being opened; recording/view_episode.py).
     Needs only the dataset, no simulator.
+The episode list shows each episode's task; for flap-labelled datasets the flap order ("open front → back → ..."),
+and below the list the selected episode's flaps with their time spans.
   * Replay in Isaac: starts the Isaac rig (once, kept running for further replays), streams the episode's
     recorded actions into it and reports how closely the arms reproduce the recorded states.
 """
@@ -66,7 +69,11 @@ class ReplayWindow(tk.Toplevel):
         g.pack(fill="both", expand=True, padx=14, pady=4)
         self.eps = tk.Listbox(g, height=10, bg=C["panel"], fg=C["fg"], selectbackground=C["accent"],
                               font=("DejaVu Sans Mono", 10), relief="flat", activestyle="none", exportselection=False)
-        self.eps.pack(fill="both", expand=True, padx=8, pady=6)
+        self.eps.pack(fill="both", expand=True, padx=8, pady=(6, 2))
+        self.eps.bind("<<ListboxSelect>>", lambda _e: self._on_select())
+        # task of the selected episode: which flap is opened when (from meta/subtask_marks.jsonl)
+        self.l_task = ttk.Label(g, text="", wraplength=900, justify="left")
+        self.l_task.pack(anchor="w", padx=8, pady=(0, 6))
 
         g = ttk.LabelFrame(self, text="3  Play")
         g.pack(fill="x", padx=14, pady=4)
@@ -142,7 +149,23 @@ class ReplayWindow(tk.Toplevel):
             self.eps.insert("end", f"episode {e['index']:3d}   {e['length']:5d} frames   {e['length'] / fps:6.1f} s   {e['task']}")
         if info["episodes"]:
             self.eps.selection_set(0)
+        self._on_select()
         self._buttons()
+
+    def _on_select(self):
+        """Show the selected episode's task(s): each flap with its time span, or the one task."""
+        if not self.info or not self.info["episodes"]:
+            self.l_task.configure(text="")
+            return
+        sel = self.eps.curselection()
+        e = self.info["episodes"][sel[0] if sel else 0]
+        flaps = e.get("flaps")
+        if flaps:
+            text = f"Episode {e['index']}:   " + "   ·   ".join(
+                f"{k}. {f['task']}  {f['start_s']:.0f}–{f['end_s']:.0f} s" for k, f in enumerate(flaps, 1))
+        else:
+            text = f"Episode {e['index']}:   task: {e['task']}"
+        self.l_task.configure(text=text)
 
     def _episode(self):
         sel = self.eps.curselection()
@@ -151,13 +174,14 @@ class ReplayWindow(tk.Toplevel):
     # ------------------------------------------------------------------ play
     def view(self):
         ep = self._episode()
-        cmd = [lerobot_python(), "-m", "lerobot.scripts.lerobot_dataset_viz", "--repo-id", f"local/{self.info['name']}",
+        # LeRobot's viewer + a "task" text panel that follows the playback (recording/view_episode.py)
+        cmd = [lerobot_python(), str(ROOT / "recording" / "view_episode.py"), "--repo-id", f"local/{self.info['name']}",
                "--root", self.info["path"], "--episode-index", str(ep)]
         self._msg(f"[view] opening episode {ep} in the LeRobot viewer (Rerun)...")
         # the Rerun viewer binary lives next to that python; HF offline = never look the local dataset up on the Hub
         env = {"HF_HUB_OFFLINE": "1", "PATH": f"{Path(cmd[0]).parent}:{os.environ.get('PATH', '')}"}
-        p = Proc("view", cmd, lambda _n, line: self._msg(f"[view] {line}") if "Error" in line or "Traceback" in line else None,
-                 extra_env=env)
+        p = Proc("view", cmd, lambda _n, line: self._msg(line if line.startswith("[view]") else f"[view] {line}")
+                 if "Error" in line or "Traceback" in line or line.startswith("[view] task") else None, extra_env=env)
         self._msg(f"[view] log: {p.log_path}")
 
     def replay_isaac(self):
