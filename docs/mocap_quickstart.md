@@ -10,8 +10,9 @@ OptiTrack (Motive) ──► rebel_demo IK (ROS domain 12) ──► mocap_follo
                                      recorder + head and wrist_right USB cameras ──► LeRobot dataset on /media/ai/aipc/Karel/Mocap/Dataset
 ```
 
-All commands run on the lab PC (`ai-iece`) from `~/robot_remote-main`, on the branch that holds this file
-(`git switch change_camera_params`).
+All commands run on the lab PC (`ai-iece`) from `~/robot_remote-main`, on branch `main`. The short version with the
+five robot_remote terminals is the [README](../README.md); this page adds the mocap-side terminals, details and
+troubleshooting.
 
 ## Before you start
 
@@ -67,7 +68,6 @@ $R activate
 
 ```bash
 cd ~/robot_remote-main
-conda deactivate
 source /opt/ros/humble/setup.bash && source igus_ws_jtc/install/setup.bash
 ros2 launch real_robot/dual_arm_driver.launch.py arms:=right
 ```
@@ -200,6 +200,7 @@ cd ~/robot_remote-main && ./launcher/run_replay_gui.sh /media/ai/aipc/Karel/Moca
 | --- | --- |
 | Recorder: `No module named 'rclpy'` | `ISAAC_SIM=$HOME/isaacsim` is missing; it must be on the same line or `export`ed. Don't source `/opt/ros` in the recorder terminal. |
 | Driver: `gains:=tuned needs jog_velocity_scale …` | The old driver is sourced. Source `igus_ws_jtc/install/setup.bash`, not `igus_ws`. (`igus_ws_jtc` = Igus_rebel 287b0186 with the `tuned` gains; adding `gains:=standard` to the launch gives the old controller behaviour on the new driver.) |
+| Driver fails at start with a library error (e.g. `libssl.so.3`) | Conda's libraries got in the way: `conda deactivate`, then source and launch again. |
 | Driver never prints `success=True`, or the arm does not hold | Check the e-stop and `ping 192.168.3.12`. Re-enable from a terminal sourced like terminal 2, plus `source ros_env.sh`: `ros2 service call /right/igus_rebel/reset_and_enable std_srvs/srv/Trigger`. After a network drop, restart the driver. |
 | rebel_demo: `dual_arm_rig_v2.urdf.xacro: No such file` | That terminal also sourced robot_remote's ROS workspace. Use a fresh terminal. |
 | Follower stays at `waiting for the mocap target to come within 3 deg …` | rebel_demo's target is far from the arm. Type `h` in the follower (or restart rebel_demo), then SPACE. |
